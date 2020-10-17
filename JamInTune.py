@@ -1,6 +1,9 @@
+import sys
+sys.path.append("./AdapTFT")
 from AdapTFT import tft
 import numpy as np
 import weightedstats as ws
+from scipy.signal import detrend
 
 
 class JamInTune(tft.TFTransformer):
@@ -8,7 +11,7 @@ class JamInTune(tft.TFTransformer):
     A0_FREQUENCY = 27.5
     MAX_PIANO_KEY_FREQUENCY = 4186.00904481
     NUM_KEYS = 88
-    PIANO_KEY_FREQUENCIES = np.array([   27.5       ,   29.13523509,   30.86770633,   32.70319566,
+    PIANO_KEY_FREQUENCIES = np.array([  A0_FREQUENCY,   29.13523509,   30.86770633,   32.70319566,
                                          34.64782887,   36.70809599,   38.89087297,   41.20344461,
                                          43.65352893,   46.24930284,   48.9994295 ,   51.9130872 ,
                                          55.        ,   58.27047019,   61.73541266,   65.40639133,
@@ -35,16 +38,20 @@ class JamInTune(tft.TFTransformer):
         super(JamInTune, self).__init__(filename)
 
         self.deviation_param_dict = {}
+        self.initialize_deviation_params()
 
     def initialize_deviation_params(self):
         self.deviation_param_dict = {
-            "hopsize":      self.AudioSignal.samplerate // 5,  # Just hop every 0.25 seconds
+            "hopsize":                                  8192,    # To avoid bug
+            # "hopsize":      self.AudioSignal.samplerate // 5,  # Just hop every 0.25 seconds
             "windowfunc":                         np.hanning,
-            "windowsize":                               4096,
-            "fftsize":                                  4096,
+            "windowsize":                               8192,
+            "fftsize":                                  8192,
             "eps_logmag":                            1.0e-16,
-            "log_cutoff_dB_freqbin":                    -120,
+            # "log_cutoff_dB_freqbin":                     -15,
+            "log_cutoff_dB_freqbin":                     -30,
             "log_cutoff_dB_stft_frame":                  -70,
+            "lower_cutoff_freq":                        200.,
         }
 
     def eval_deviation(self):
@@ -75,6 +82,9 @@ class JamInTune(tft.TFTransformer):
         max_piano_key_frequency_normalized = self.MAX_PIANO_KEY_FREQUENCY / samplerate
         # Set upper bound on reassignment frequency
         rf_upper_bound = min([0.5, max_piano_key_frequency_normalized])  # 0.5 is Nyquist
+        lower_cutoff_freq = self.deviation_param_dict["lower_cutoff_freq"]
+        lower_bound_freq = max([lower_cutoff_freq, self.A0_FREQUENCY])
+        rf_lower_bound = lower_bound_freq / samplerate
         logenergies_per_stft_frame = []
         medians_per_stft_frame = []
         log_cutoff_freqbin = self.deviation_param_dict["log_cutoff_dB_freqbin"] / 20
@@ -90,34 +100,69 @@ class JamInTune(tft.TFTransformer):
         # Convert that to the number of audio frames that you'll analyze for non-boundary RF.
         num_audio_frames_full_rf = (num_full_rf_frames - 1) * hopsize + windowsize_p1
 
+        print(num_audio_frames)
+        print(hopsize)
+        print(num_full_rf_frames)
+        print(num_audio_frames_full_rf)
+
         # Feed blocks to create the non-boundary RF frames
         blockreader = self.AudioSignal.blocks(blocksize=windowsize_p1, overlap=overlap,
                                               frames=num_audio_frames_full_rf, always_2d=True)
 
+        np.set_printoptions(threshold=np.inf)
+
         for block in blockreader:
             block = block.T                                         # First transpose to get each channel as a row
-            wft = self.wft(block[:, :windowsize], window, fftsize)  # Calculate windowed fft of signal
+            try:
+                wft = self.wft(block[:, :windowsize], window, fftsize)  # Calculate windowed fft of signal
+            except ValueError:
+                print(frame0)
+                raise
             wft_plus = self.wft(block[:, 1:], window, fftsize)      # Calculate windowed fft of shifted signal
+            # logabswft = detrend(np.log10(np.abs(wft) + eps_logmag))  # Detrend the spectrum to make it more even
+            # logabswft -= np.max(logabswft)                           # To max it at 0 dB
             logabswft = np.log10(np.abs(wft) + eps_logmag)
 
             # Calculate reassignment frequencies (unit: normalized frequency) and deal with edge cases
             # Soft threshold the logabswft then get strictly nonnegative weights
             rf = self._calculate_rf(wft, wft_plus)
-            out_of_bounds = np.where((rf < 0) | (rf > rf_upper_bound) | (logabswft < log_cutoff_freqbin))
-            logabswft[out_of_bounds] = log_cutoff_freqbin
-            rf[out_of_bounds] = 0
-            logabswft -= log_cutoff_freqbin  # To use as weights... soft thresholding
+            in_bounds = np.where( (rf >= rf_lower_bound) & (rf <= rf_upper_bound) & (logabswft >= log_cutoff_freqbin))
+            logabswft = logabswft[in_bounds]
+            rf = rf[in_bounds]
+            # print(rf)
+            # print(logabswft)
+
+            # out_of_bounds = np.where((rf < rf_lower_bound) | (rf > rf_upper_bound) | (logabswft < log_cutoff_freqbin))
+            # logabswft[out_of_bounds] = log_cutoff_freqbin
+            # rf[out_of_bounds] = 0
+            # logabswft -= log_cutoff_freqbin  # To use as weights... soft thresholding
+            magwftsq = np.power(10., 2*logabswft)
 
             # Now calculate the deviations from the nearest piano key and get weights, then append weighted median
-            nearest_piano_keys = np.round(12 * np.log2(rf / self.A0_FREQUENCY )).astype(int)
-            assert( all([nearest_piano_keys[key_idx] >= 0 for key_idx in nearest_piano_keys]) and
-                    all([nearest_piano_keys[key_idx] < self.NUM_KEYS for key_idx in nearest_piano_keys]) )
-            nearest_piano_frequencies_normalized = self.PIANO_KEY_FREQUENCIES[nearest_piano_keys] / samplerate
-            deviations = rf - nearest_piano_frequencies_normalized
-            medians_per_stft_frame.append(ws.numpy_weighted_median(deviations, weights=logabswft))
-
-            # Now calculate the frame's log energy and append
-            logenergies_per_stft_frame.append(np.log10( (np.linalg.norm(wft) / energy_constant) + eps_logmag))
+            # Note that I do multiply by samplerate/self.A0_FREQUENCY,
+            # instead of division by rf_lower_bound, just in case rf_lower_bound gets changed.
+            rf_logarithmic = 12 * np.log2(rf * samplerate / self.A0_FREQUENCY )
+            nearest_piano_keys = np.round(rf_logarithmic).astype(int)
+            # try:
+            #     assert( all([ (nearest_piano_keys[k, l] >= 0) &
+            #                   (nearest_piano_keys[k, l] < self.NUM_KEYS) for k, l in nearest_piano_keys]))
+            #
+            # except AssertionError:
+            #     print(nearest_piano_keys)
+            #     raise
+            # nearest_piano_frequencies_normalized = self.PIANO_KEY_FREQUENCIES[nearest_piano_keys] / samplerate
+            deviations = rf_logarithmic - nearest_piano_keys
+            # print(deviations)
+            if np.size(deviations):
+                # median = ws.numpy_weighted_median(deviations, weights=logabswft)
+                median = ws.numpy_weighted_median(deviations, weights=magwftsq)
+                # median = np.average(deviations, weights=magwftsq)
+                # print(median)
+                medians_per_stft_frame.append(median)
+                # Now calculate the frame's log energy and append
+                logenergy = np.log10((np.linalg.norm(wft) ** 2.0 / energy_constant) + eps_logmag)
+                logenergies_per_stft_frame.append(logenergy)
+            frame0 += hopsize
 
         # After looping through all blocks, soft threshold log energies and calculate the final weighted median
         # deviation
@@ -125,7 +170,7 @@ class JamInTune(tft.TFTransformer):
         out_of_bounds = np.where(logenergies_per_stft_frame < log_cutoff_stft_frame)
         logenergies_per_stft_frame[out_of_bounds] = log_cutoff_stft_frame
         logenergies_per_stft_frame -= log_cutoff_stft_frame
-        return ws.weighted_median(medians_per_stft_frame, logenergies_per_stft_frame)
+        return ws.numpy_weighted_median(np.asarray(medians_per_stft_frame), logenergies_per_stft_frame)
 
     def modify_pitch(self):
         # This is where I have to look up the best way to do this according to Serra's course
