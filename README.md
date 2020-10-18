@@ -102,7 +102,7 @@ We also compute the energy in this frame by summing the magnitude-squared FFT va
 - Once all frames have their weighted median deviations calculated, we threshold the frame energies by a certain value (currently, -70 dB). 
 Then, using the thresholded energies as weights, we compute the weighted median (over time) of the weighted median deviations. 
 This final number is our approximate deviation.
-- The weighted median RF idea is an outlier-robust spinoff of the <i>weighted average RF</i> idea in [[3]](#3).
+- The weighted median deviation idea is an outlier-robust inspiration of the <i>weighted average RF</i> idea in [[3]](#3).
 
 ### 3) Pitch shift the recording according to the approximate deviation
 We use the [`pysox`](https://pypi.org/project/sox/) Python wrapper around `sox` to pitch-shift the input recording according 
