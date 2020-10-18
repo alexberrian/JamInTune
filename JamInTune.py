@@ -1,16 +1,18 @@
-import sys
-sys.path.append("./AdapTFT")
-from AdapTFT import tft
+from audio_io import AudioSignal  #TODO: Make this code depend upon AdapTFR
 import numpy as np
+import soundfile as sf
 import weightedstats as ws
 import sox
-import librosa
+import librosa  #TODO: Replace librosa with real-time simultaneous HPSS and tuning
 import os
-# from scipy.signal import detrend
+
+TWOPI = 2 * np.pi
 
 
-class JamInTune(tft.TFTransformer):
-    # This is perhaps a little bit of a lowpass.  May want to care about higher frequencies too.
+class JamInTune(object):
+    KERNEL_HARMONIC_SIZE = 31     # For hop size 2048
+    KERNEL_PERCUSSIVE_SIZE = 124  # For FFT size 8192
+    # TODO: This is perhaps a little bit of a lowpass.  May want to care about higher frequencies too.
     A0_FREQUENCY = 27.5
     MAX_PIANO_KEY_FREQUENCY = 4186.00904481
     NUM_KEYS = 88
@@ -38,27 +40,31 @@ class JamInTune(tft.TFTransformer):
                                        3520.        , 3729.31009214, 3951.06641005, MAX_PIANO_KEY_FREQUENCY])
 
     def __init__(self, filename):
-        super(JamInTune, self).__init__(filename)
-
         self.input_filename = filename
+        self.intermediate_harmonic_filename = None
         self.output_filename = None
         self.deviation_param_dict = {}
         self._initialize_deviation_params()
+        self._set_intermediate_harmonic_filename()
         self._set_output_filename()
 
     def _initialize_deviation_params(self):
         self.deviation_param_dict = {
-            "hopsize":                                  2048,    # To avoid bug, must be less than windowsize
+            "hopsize":                                  2048,
             # "hopsize":      self.AudioSignal.samplerate // 5,  # Just hop every 0.25 seconds
             "windowfunc":                         np.hanning,
             "windowsize":                               8192,
             "fftsize":                                  8192,
-            "eps_logmag":                            1.0e-16,
+            "eps":                                   1.0e-16,
             # "log_cutoff_dB_freqbin":                     -15,
             "log_cutoff_dB_freqbin":                     -30,
             "log_cutoff_dB_stft_frame":                  -70,
             "lower_cutoff_freq":                        200.,
         }
+
+    def _set_intermediate_harmonic_filename(self):
+        out_base, out_extn = os.path.splitext(self.input_filename)
+        self.intermediate_harmonic_filename = "{}_harm{}".format(out_base, out_extn)
 
     def _set_output_filename(self, infile: str = None, outfile: str = None):
         if infile is None:
@@ -66,14 +72,66 @@ class JamInTune(tft.TFTransformer):
 
         if outfile is None:  # Default case
             out_base, out_extn = os.path.splitext(infile)
-            self.output_filename = "{}_out{}".format(out_base, out_extn)
+            self.output_filename = "{}_tuned{}".format(out_base, out_extn)
         else:  # Might be good to have path validation here...
             self.output_filename = outfile
 
-    def _harmonic_separator(self):
-        # Make a circular buffer out of a numpy array
+    def _calculate_rf(self, wft: np.ndarray, wft_plus: np.ndarray) -> np.ndarray:
+        eps_division = self.deviation_param_dict["eps"]
+        return np.angle(wft_plus / (wft + eps_division)) / TWOPI  # Unit: Normalized frequency
 
-        pass
+    def _wft(self, block: np.ndarray, window: np.ndarray, fftsize: int, fft_type="real") -> np.ndarray:
+        if fft_type == "real":
+            return np.fft.rfft(self._zeropad_rows(window * block, fftsize))
+        elif fft_type == "complex_short":
+            return np.fft.fft(self._zeropad_rows(window * block, fftsize))[:, :(1 + (fftsize // 2))]
+        elif fft_type == "complex_full":  # For reconstruction
+            return np.fft.fft(self._zeropad_rows(window * block, fftsize))
+        else:
+            raise ValueError("Invalid fft_type {}, must use 'real', 'complex_short', "
+                             "or 'complex_full'".format(fft_type))
+
+    @staticmethod
+    def _zeropad_rows(input_array: np.ndarray, finalsize: int) -> np.ndarray:
+        """
+        Zeropad each channel of a buffer, where channels are assumed to be in rows.
+        Padding happens with the input array centered, and zeros padded equally on left and right,
+        unless finalsize minus inputsize is odd.
+        This is used for preparing a windowed array to be sent to an FFT.
+
+        :param input_array: array to be padded with zeros
+        :param finalsize: final size of the array (example: FFT size)
+        :return: output_array: zero-padded array
+        """
+        inputsize = input_array.shape[1]
+        if inputsize == finalsize:
+            return input_array
+        else:
+            padsize = finalsize - inputsize
+            padsize_left = padsize // 2
+            padsize_right = padsize - padsize_left
+
+            if len(input_array.shape) == 2:
+                output_array = np.pad(input_array, ((0, 0), (padsize_left, padsize_right)), mode='constant')
+            else:
+                raise ValueError("input array to zeropad_rows has dimensions {}, "
+                                 "which is not supported... must be 2D array even if mono".format(input_array.shape))
+
+            return output_array
+
+    def harmonic_separator(self):
+        """
+        Creates intermediate wave file with harmonic-only content from the input wave file.
+        """
+
+        # TODO: make a circular buffer out of a numpy array to streamline this process with the rest of the code,
+        # instead of doing repetitive computation and exporting an intermediate file.
+
+        sig, sr = librosa.load(self.input_filename, sr=None)
+        stft = librosa.stft(sig, n_fft=self.deviation_param_dict["fftsize"])
+        harm, _ = librosa.decompose.hpss(stft, kernel_size=(31, 124), margin=3.0)
+        y_harm = librosa.istft(harm)
+        sf.write(self.intermediate_harmonic_filename, y_harm, sr)
 
     def eval_deviation(self):
         """
@@ -89,6 +147,8 @@ class JamInTune(tft.TFTransformer):
         windowsize = self.deviation_param_dict["windowsize"]
         if windowsize < 4:
             raise ValueError("windowsize {} must be at least 4 to deal with potential edge cases".format(windowsize))
+        if hopsize > windowsize:
+            raise ValueError("Can't have hopsize {} be larger than windowsize {}".format(hopsize, windowsize))
         windowsize_p1 = windowsize + 1
         fftsize = self.deviation_param_dict["fftsize"]
         if windowsize > fftsize:
@@ -98,8 +158,9 @@ class JamInTune(tft.TFTransformer):
         window = windowfunc(windowsize)
         energy_constant = windowsize * np.linalg.norm(window)**2.0
         frame0 = 0
-        samplerate = self.AudioSignal.samplerate
-        eps_logmag = self.deviation_param_dict["eps_logmag"]
+        sig = AudioSignal(self.intermediate_harmonic_filename)
+        samplerate = sig.samplerate
+        eps_logmag = self.deviation_param_dict["eps"]
         max_piano_key_frequency_normalized = self.MAX_PIANO_KEY_FREQUENCY / samplerate
         # Set upper bound on reassignment frequency
         rf_upper_bound = min([0.5, max_piano_key_frequency_normalized])  # 0.5 is Nyquist
@@ -112,7 +173,7 @@ class JamInTune(tft.TFTransformer):
         log_cutoff_stft_frame = self.deviation_param_dict["log_cutoff_dB_stft_frame"] / 20
 
         # Get the number of audio frames, and seek to the the first audio frame (no boundary treatment)
-        num_audio_frames = self.AudioSignal.get_num_frames_from_and_seek_start(start_frame=frame0)
+        num_audio_frames = sig.get_num_frames_from_and_seek_start(start_frame=frame0)
 
         # Now calculate the max number of FULL non-boundary frames you need to compute RF,
         # considering hop size and window size.
@@ -122,36 +183,27 @@ class JamInTune(tft.TFTransformer):
         num_audio_frames_full_rf = (num_full_rf_frames - 1) * hopsize + windowsize_p1
 
         # Feed blocks to create the non-boundary RF frames
-        blockreader = self.AudioSignal.blocks(blocksize=windowsize_p1, overlap=overlap,
-                                              frames=num_audio_frames_full_rf, always_2d=True)
+        blockreader = sig.blocks(blocksize=windowsize_p1, overlap=overlap,
+                                 frames=num_audio_frames_full_rf, always_2d=True)
 
         np.set_printoptions(threshold=np.inf)
 
         for block in blockreader:
             block = block.T                                         # First transpose to get each channel as a row
             try:
-                wft = self.wft(block[:, :windowsize], window, fftsize)  # Calculate windowed fft of signal
+                wft = self._wft(block[:, :windowsize], window, fftsize)  # Calculate windowed fft of signal
             except ValueError:
                 print(frame0)
                 raise
-            wft_plus = self.wft(block[:, 1:], window, fftsize)      # Calculate windowed fft of shifted signal
-            # logabswft = detrend(np.log10(np.abs(wft) + eps_logmag))  # Detrend the spectrum to make it more even
-            # logabswft -= np.max(logabswft)                           # To max it at 0 dB
+            wft_plus = self._wft(block[:, 1:], window, fftsize)      # Calculate windowed fft of shifted signal
             logabswft = np.log10(np.abs(wft) + eps_logmag)
 
             # Calculate reassignment frequencies (unit: normalized frequency) and deal with edge cases
-            # Soft threshold the logabswft then get strictly nonnegative weights
+            # Threshold the logabswft
             rf = self._calculate_rf(wft, wft_plus)
             in_bounds = np.where( (rf >= rf_lower_bound) & (rf <= rf_upper_bound) & (logabswft >= log_cutoff_freqbin))
             logabswft = logabswft[in_bounds]
             rf = rf[in_bounds]
-            # print(rf)
-            # print(logabswft)
-
-            # out_of_bounds = np.where((rf < rf_lower_bound) | (rf > rf_upper_bound) | (logabswft < log_cutoff_freqbin))
-            # logabswft[out_of_bounds] = log_cutoff_freqbin
-            # rf[out_of_bounds] = 0
-            # logabswft -= log_cutoff_freqbin  # To use as weights... soft thresholding
             magwftsq = np.power(10., 2*logabswft)
 
             # Now calculate the deviations from the nearest piano key and get weights, then append weighted median
@@ -159,21 +211,10 @@ class JamInTune(tft.TFTransformer):
             # instead of division by rf_lower_bound, just in case rf_lower_bound gets changed.
             rf_logarithmic = 12 * np.log2(rf * samplerate / self.A0_FREQUENCY )
             nearest_piano_keys = np.round(rf_logarithmic).astype(int)
-            # try:
-            #     assert( all([ (nearest_piano_keys[k, l] >= 0) &
-            #                   (nearest_piano_keys[k, l] < self.NUM_KEYS) for k, l in nearest_piano_keys]))
-            #
-            # except AssertionError:
-            #     print(nearest_piano_keys)
-            #     raise
-            # nearest_piano_frequencies_normalized = self.PIANO_KEY_FREQUENCIES[nearest_piano_keys] / samplerate
             deviations = rf_logarithmic - nearest_piano_keys
-            # print(deviations)
+
             if np.size(deviations):
-                # median = ws.numpy_weighted_median(deviations, weights=logabswft)
                 median = ws.numpy_weighted_median(deviations, weights=magwftsq)
-                # median = np.average(deviations, weights=magwftsq)
-                # print(median)
                 medians_per_stft_frame.append(median)
                 # Now calculate the frame's log energy and append
                 logenergy = np.log10((np.linalg.norm(wft) ** 2.0 / energy_constant) + eps_logmag)
@@ -202,7 +243,7 @@ class JamInTune(tft.TFTransformer):
                           "up" - force shift to the nearest note up, assuming deviation gets you to standard Western
                                  music notes
                           "down" - same as above but nearest note down.
-        :param bias: number of semitones up or down you want to add, can be fractional (but why would you do that?)
+        :param bias: number of semitones up or down you want to add, can be fractional
         """
         if direction == "closest":
             pass # Do nothing
@@ -225,13 +266,24 @@ class JamInTune(tft.TFTransformer):
         soxtfm.pitch(shift)
         soxtfm.build_file(infile, self.output_filename)
 
-    def jam_out(self):
+    def jam_out(self, direction="closest", bias=0):
         """
-        Does all the functions above in order
+        Jam out!
+        Isolate the harmonic content from the input audio, calculate the deviation from standard Western music notes,
+        and pitch-shift accordingly.
+        :param direction: direction in which to modify the pitch
+                          "closest" (default) - pitch shifted by -deviation.
+                              If the output is from self.eval_deviation, then this is trying to shift pitches to the
+                              closest standard Western music notes.
+                          "up" - force shift to the nearest note up, assuming deviation gets you to standard Western
+                                 music notes
+                          "down" - same as above but nearest note down.
+        :param bias: number of semitones up or down you want to add, can be fractional
         :return:
         """
-
-        pass
+        self.harmonic_separator()
+        deviation = self.eval_deviation()
+        self.modify_pitch(deviation, direction=direction, bias=bias)
 
 
 
