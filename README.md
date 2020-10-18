@@ -1,4 +1,4 @@
-## JamInTune
+# JamInTune
 <b>Tune an audio recording to match standard Western piano key frequencies</b>  
 <i>Hacking Audio Music Research (HAMR) 2020</i>  
 <b>Author:</b> Alex Berrian
