@@ -42,12 +42,15 @@ weightedstats==0.4.1
 sox==1.4.1
 ```
 
-## Acceptable Inputs
-This code will take in and write out whatever [`soundfile`](https://pypi.org/project/SoundFile/) can read as audio. 
-However, I have only tested with `.wav` formats due to time constraints.
+## Get the code and try it out!
+```
+git clone git@github.com:alexberrian/JamInTune.git
+pip3 install -r requirements.txt
+python3  # Then from here look at "Usage" below
+```
 
 ## Usage
-Simple example:
+Simple example (from within the Python3 shell):
 ```
 import JamInTune
 filename = "/path/to/blackholesun.wav"
@@ -66,6 +69,10 @@ Or use the bias parameter to shift additional semitones if you want lower or hig
 ```
 jam = jam_out(bias=-5)  # Shifts the tuned recording 5 semitones down, i.e. 5 piano keys down
 ```
+
+## Acceptable Inputs
+This code will take in and write out whatever [`soundfile`](https://pypi.org/project/SoundFile/) can read as audio. 
+However, I have only tested with `.wav` formats due to time constraints.
 
 ## How It Works
 The code works in three steps:
