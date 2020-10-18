@@ -55,19 +55,19 @@ Simple example (from within the Python3 shell):
 import JamInTune
 filename = "/path/to/blackholesun.wav"
 jam = JamInTune.JamInTune(filename)
-jam = jam_out()  # Exports the tuned file as "/path/to/blackholesun_tuned.wav"
+jam.jam_out()  # Exports the tuned file as "/path/to/blackholesun_tuned.wav"
 ```
 If you want the recording to be shifted to the closest piano keys up or down, rather than the closest keys in whatever direction:
 ```
-jam = jam_out(direction="up")  # Or direction="down"
+jam.jam_out(direction="up")  # Or direction="down"
 ```
 You could also <i>detune</i> the recording from piano keys by using the `bias` parameter (in units of semitones):
 ```
-jam = jam_out(bias=1.337)  # Shifts the tuned recording 1.337 semitones up
+jam.jam_out(bias=1.337)  # Shifts the tuned recording 1.337 semitones up
 ```
 Or use the bias parameter to shift additional semitones if you want lower or higher keys than the closest one:
 ```
-jam = jam_out(bias=-5)  # Shifts the tuned recording 5 semitones down, i.e. 5 piano keys down
+jam.jam_out(bias=-5)  # Shifts the tuned recording 5 semitones down, i.e. 5 piano keys down
 ```
 
 ## Acceptable Inputs
