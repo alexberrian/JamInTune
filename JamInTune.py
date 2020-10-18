@@ -3,7 +3,10 @@ sys.path.append("./AdapTFT")
 from AdapTFT import tft
 import numpy as np
 import weightedstats as ws
-from scipy.signal import detrend
+import sox
+import librosa
+import os
+# from scipy.signal import detrend
 
 
 class JamInTune(tft.TFTransformer):
@@ -37,12 +40,15 @@ class JamInTune(tft.TFTransformer):
     def __init__(self, filename):
         super(JamInTune, self).__init__(filename)
 
+        self.input_filename = filename
+        self.output_filename = None
         self.deviation_param_dict = {}
-        self.initialize_deviation_params()
+        self._initialize_deviation_params()
+        self._set_output_filename()
 
-    def initialize_deviation_params(self):
+    def _initialize_deviation_params(self):
         self.deviation_param_dict = {
-            "hopsize":                                  8192,    # To avoid bug
+            "hopsize":                                  2048,    # To avoid bug, must be less than windowsize
             # "hopsize":      self.AudioSignal.samplerate // 5,  # Just hop every 0.25 seconds
             "windowfunc":                         np.hanning,
             "windowsize":                               8192,
@@ -53,6 +59,21 @@ class JamInTune(tft.TFTransformer):
             "log_cutoff_dB_stft_frame":                  -70,
             "lower_cutoff_freq":                        200.,
         }
+
+    def _set_output_filename(self, infile: str = None, outfile: str = None):
+        if infile is None:
+            infile = self.input_filename
+
+        if outfile is None:  # Default case
+            out_base, out_extn = os.path.splitext(infile)
+            self.output_filename = "{}_out{}".format(out_base, out_extn)
+        else:  # Might be good to have path validation here...
+            self.output_filename = outfile
+
+    def _harmonic_separator(self):
+        # Make a circular buffer out of a numpy array
+
+        pass
 
     def eval_deviation(self):
         """
@@ -99,11 +120,6 @@ class JamInTune(tft.TFTransformer):
 
         # Convert that to the number of audio frames that you'll analyze for non-boundary RF.
         num_audio_frames_full_rf = (num_full_rf_frames - 1) * hopsize + windowsize_p1
-
-        print(num_audio_frames)
-        print(hopsize)
-        print(num_full_rf_frames)
-        print(num_audio_frames_full_rf)
 
         # Feed blocks to create the non-boundary RF frames
         blockreader = self.AudioSignal.blocks(blocksize=windowsize_p1, overlap=overlap,
@@ -172,11 +188,48 @@ class JamInTune(tft.TFTransformer):
         logenergies_per_stft_frame -= log_cutoff_stft_frame
         return ws.numpy_weighted_median(np.asarray(medians_per_stft_frame), logenergies_per_stft_frame)
 
-    def modify_pitch(self):
-        # This is where I have to look up the best way to do this according to Serra's course
-        pass
+    def modify_pitch(self, deviation: float, infile: str = None, direction: str = "closest", bias=0):
+        """
+        Use sox to modify the pitch.
+        Exports the pitch-shifted file to self.output_filename.
+
+        :param deviation: deviation in number of semitones (from self.eval_deviation, or choose your own)
+        :param infile: put this here if you want to pitch shift a different file from self.input_filename.
+        :param direction: direction in which to modify the pitch
+                          "closest" (default) - pitch shifted by -deviation.
+                              If the output is from self.eval_deviation, then this is trying to shift the pitch to the
+                              closest standard Western music notes.
+                          "up" - force shift to the nearest note up, assuming deviation gets you to standard Western
+                                 music notes
+                          "down" - same as above but nearest note down.
+        :param bias: number of semitones up or down you want to add, can be fractional (but why would you do that?)
+        """
+        if direction == "closest":
+            pass # Do nothing
+        elif direction == "up":
+            if deviation > 0:  # if closest note is below
+                deviation -= 1
+        elif direction == "down":
+            if deviation < 0:  # if closest note is above
+                deviation += 1
+        else:
+            raise ValueError("Invalid direction {}, must be 'closest' (default), 'up', or 'down'".format(direction))
+        if infile is None:
+            infile = self.input_filename
+        else:
+            self._set_output_filename(infile=infile)
+
+        shift = -deviation + bias
+
+        soxtfm = sox.Transformer()
+        soxtfm.pitch(shift)
+        soxtfm.build_file(infile, self.output_filename)
 
     def jam_out(self):
+        """
+        Does all the functions above in order
+        :return:
+        """
 
         pass
 
