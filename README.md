@@ -44,8 +44,9 @@ sox==1.4.1
 
 ## Get the code and try it out!
 ```
-git clone git@github.com:alexberrian/JamInTune.git
+git clone git@github.com:alexberrian/JamInTune.git JamInTune
 pip3 install -r requirements.txt
+cd JamInTune
 python3  # Then from here look at "Usage" below
 ```
 
