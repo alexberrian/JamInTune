@@ -1,5 +1,5 @@
 # JamInTune
-<b>Tune an audio recording to match standard Western piano key frequencies</b>  
+<b>Tune an audio recording to match standard Western piano key frequencies</b>  (Python package)
 <i>Hacking Audio Music Research (HAMR) 2020</i>  
 <b>Author:</b> Alex Berrian
 
