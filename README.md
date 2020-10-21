@@ -20,7 +20,6 @@ piano key frequencies, and then it shifts the pitch of the recording so that the
 Soundgarden - Black Hole Sun
 James Newman - My Last Breath (the United Kingdom's entry in the 2020 Eurovision Song Contest)
 Gotye feat. Kimbra - Somebody That I Used To Know
-The Beatles - Penny Lane
 Tommy Tutone - 867-5309 / Jenny
 P. Diddy feat. Ginuwine, Loon, Mario Winans, and Tammy Ruggieri - I Need a Girl (Part 2)
 Derek & The Dominos - Layla
