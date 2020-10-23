@@ -61,6 +61,19 @@ class JamInTune(object):
             "log_cutoff_dB_stft_frame":                  -70,
             "lower_cutoff_freq":                        200.,
         }
+        self._check_deviation_params_valid()
+
+    def _check_deviation_params_valid(self):
+        windowsize = self.deviation_param_dict["windowsize"]
+        fftsize = self.deviation_param_dict["fftsize"]
+        hopsize = self.deviation_param_dict["hopsize"]
+        if windowsize < 4:
+            raise ValueError("windowsize {} must be at least 4 to deal with potential edge cases".format(windowsize))
+        if hopsize > windowsize:
+            raise ValueError("Not allowed to have hopsize {} larger than windowsize {} "
+                             "because of the way SoundFile processes chunks".format(hopsize, windowsize))
+        if windowsize > fftsize:
+            raise ValueError("Cannot have windowsize {} larger than fftsize {}".format(windowsize, fftsize))
 
     def _set_intermediate_harmonic_filename(self):
         out_base, out_extn = os.path.splitext(self.input_filename)
@@ -136,53 +149,51 @@ class JamInTune(object):
     def eval_deviation(self):
         """
         Calculate the weighted median weighted median deviation from piano key frequencies. :)
-
-        Questions:
-        - Is the soft thresholding really valid or should it be a hard cutoff to preserve logarithmic scale?
         :return:
         """
 
-        # Initialize variables
+        # Initialize windowing variables
         hopsize = self.deviation_param_dict["hopsize"]
         windowsize = self.deviation_param_dict["windowsize"]
-        if windowsize < 4:
-            raise ValueError("windowsize {} must be at least 4 to deal with potential edge cases".format(windowsize))
-        if hopsize > windowsize:
-            raise ValueError("Can't have hopsize {} be larger than windowsize {}".format(hopsize, windowsize))
-        windowsize_p1 = windowsize + 1
-        fftsize = self.deviation_param_dict["fftsize"]
-        if windowsize > fftsize:
-            raise ValueError("window size {} is larger than FFT size {}!".format(windowsize, fftsize))
         windowfunc = self.deviation_param_dict["windowfunc"]
+        fftsize = self.deviation_param_dict["fftsize"]
+        windowsize_p1 = windowsize + 1
         overlap = windowsize_p1 - hopsize
         window = windowfunc(windowsize)
         energy_constant = windowsize * np.linalg.norm(window)**2.0
-        frame0 = 0
+
+        # Read the harmonic signal (TODO: Shouldn't have to do this, should already have harmonic spectrogram available)
         sig = AudioSignal(self.intermediate_harmonic_filename)
         samplerate = sig.samplerate
-        eps_logmag = self.deviation_param_dict["eps"]
         max_piano_key_frequency_normalized = self.MAX_PIANO_KEY_FREQUENCY / samplerate
-        # Set upper bound on reassignment frequency
+
+        # Set bounds on reassignment frequency
         rf_upper_bound = min([0.5, max_piano_key_frequency_normalized])  # 0.5 is Nyquist
         lower_cutoff_freq = self.deviation_param_dict["lower_cutoff_freq"]
         lower_bound_freq = max([lower_cutoff_freq, self.A0_FREQUENCY])
         rf_lower_bound = lower_bound_freq / samplerate
+
+        # Initialize per-frame lists of log-energies and of median deviations from piano key frequencies
         logenergies_per_stft_frame = []
         medians_per_stft_frame = []
+
+        # Set cutoffs for thresholding the log magnitudes and log energies, and epsilon for calculating log
         log_cutoff_freqbin = self.deviation_param_dict["log_cutoff_dB_freqbin"] / 20
         log_cutoff_stft_frame = self.deviation_param_dict["log_cutoff_dB_stft_frame"] / 20
+        eps_logmag = self.deviation_param_dict["eps"]
 
-        # Get the number of audio frames, and seek to the the first audio frame (no boundary treatment)
+        # Get the number of audio frames, and seek to the the first audio frame (no boundary treatment TODO???)
+        frame0 = 0
         num_audio_frames = sig.get_num_frames_from_and_seek_start(start_frame=frame0)
 
         # Now calculate the max number of FULL non-boundary frames you need to compute RF,
         # considering hop size and window size.
         num_full_rf_frames = 1 + ((num_audio_frames - windowsize_p1) // hopsize)
 
-        # Convert that to the number of audio frames that you'll analyze for non-boundary RF.
+        # Convert that to the number of audio frames that you'll analyze for non-boundary RF. (TODO???)
         num_audio_frames_full_rf = (num_full_rf_frames - 1) * hopsize + windowsize_p1
 
-        # Feed blocks to create the non-boundary RF frames
+        # Feed blocks to create the non-boundary RF frames  (TODO???)
         blockreader = sig.blocks(blocksize=windowsize_p1, overlap=overlap,
                                  frames=num_audio_frames_full_rf, always_2d=True)
 
@@ -193,7 +204,7 @@ class JamInTune(object):
             try:
                 wft = self._wft(block[:, :windowsize], window, fftsize)  # Calculate windowed fft of signal
             except ValueError:
-                print(frame0)
+                print("Current frame at which there is an error: {}".format(frame0))
                 raise
             wft_plus = self._wft(block[:, 1:], window, fftsize)      # Calculate windowed fft of shifted signal
             logabswft = np.log10(np.abs(wft) + eps_logmag)
@@ -209,12 +220,12 @@ class JamInTune(object):
             # Now calculate the deviations from the nearest piano key and get weights, then append weighted median
             # Note that I do multiply by samplerate/self.A0_FREQUENCY,
             # instead of division by rf_lower_bound, just in case rf_lower_bound gets changed.
-            rf_logarithmic = 12 * np.log2(rf * samplerate / self.A0_FREQUENCY )
+            rf_logarithmic = 12 * np.log2(rf * samplerate / self.A0_FREQUENCY)
             nearest_piano_keys = np.round(rf_logarithmic).astype(int)
             deviations = rf_logarithmic - nearest_piano_keys
 
             if np.size(deviations):
-                median = ws.numpy_weighted_median(deviations, weights=magwftsq)
+                median = ws.numpy_weighted_median(deviations, weights=magwftsq)  # Mag-squared works, log-mag doesn't
                 medians_per_stft_frame.append(median)
                 # Now calculate the frame's log energy and append
                 logenergy = np.log10((np.linalg.norm(wft) ** 2.0 / energy_constant) + eps_logmag)
@@ -226,7 +237,7 @@ class JamInTune(object):
         logenergies_per_stft_frame = np.asarray(logenergies_per_stft_frame)
         out_of_bounds = np.where(logenergies_per_stft_frame < log_cutoff_stft_frame)
         logenergies_per_stft_frame[out_of_bounds] = log_cutoff_stft_frame
-        logenergies_per_stft_frame -= log_cutoff_stft_frame
+        logenergies_per_stft_frame -= log_cutoff_stft_frame  # Necessary to make weights positive
         return ws.numpy_weighted_median(np.asarray(medians_per_stft_frame), logenergies_per_stft_frame)
 
     def modify_pitch(self, deviation: float, infile: str = None, direction: str = "closest", bias=0):
