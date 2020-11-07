@@ -59,7 +59,7 @@ class JamInTune(object):
             # "log_cutoff_dB_freqbin":                     -15,
             "log_cutoff_dB_freqbin":                     -30,
             "log_cutoff_dB_stft_frame":                  -70,
-            "lower_cutoff_freq":                        200.,
+            "lower_cutoff_freq":                        200.,  # TODO: Optimize this, preferably signal-based manner
         }
         self._check_deviation_params_valid()
 
