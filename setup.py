@@ -18,4 +18,8 @@ setuptools.setup(name='JamInTune-alexberrian',
          "Operating System :: OS Independent",
      ],
      python_requires='>=3.7',
+     install_requires=['librosa>=0.8.0',
+                       'soundfile>=0.10.3.post1',
+                       'weightedstats>=0.4.1',
+                       'sox>=1.4.1'],
 )
