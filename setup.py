@@ -22,5 +22,8 @@ setuptools.setup(name='JamInTune-alexberrian',
                        'librosa>=0.8.0',
                        'soundfile>=0.10.3.post1',
                        'weightedstats>=0.4.1',
-                       'sox>=1.4.1'],
+                       'sox>=1.4.1',
+                       'llvmlite==0.33.0',
+                       'numba==0.50.1',
+                       ],  #Fix llvmlite and numba because they and librosa don't play well together
 )
