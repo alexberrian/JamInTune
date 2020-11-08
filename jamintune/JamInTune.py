@@ -1,4 +1,4 @@
-from audio_io import AudioSignal  #TODO: Make this code depend upon AdapTFR
+from jamintune.audio_io import AudioSignal  #TODO: Make this code depend upon AdapTFR
 import numpy as np
 import soundfile as sf
 import weightedstats as ws
