@@ -60,6 +60,7 @@ class JamInTune(object):
             "log_cutoff_dB_freqbin":                     -30,
             "log_cutoff_dB_stft_frame":                  -70,
             "lower_cutoff_freq":                        200.,  # TODO: Optimize this, preferably signal-based manner
+            "buffermode":                   "valid_analysis",
         }
         self._check_deviation_params_valid()
 
@@ -67,6 +68,7 @@ class JamInTune(object):
         windowsize = self.deviation_param_dict["windowsize"]
         fftsize = self.deviation_param_dict["fftsize"]
         hopsize = self.deviation_param_dict["hopsize"]
+        buffermode = self.deviation_param_dict["buffermode"]
         if windowsize < 4:
             raise ValueError("windowsize {} must be at least 4 to deal with potential edge cases".format(windowsize))
         if hopsize > windowsize:
@@ -74,6 +76,8 @@ class JamInTune(object):
                              "because of the way SoundFile processes chunks".format(hopsize, windowsize))
         if windowsize > fftsize:
             raise ValueError("Cannot have windowsize {} larger than fftsize {}".format(windowsize, fftsize))
+        if buffermode not in ["centered_analysis", "valid_analysis"]:
+            raise ValueError("Invalid buffermode {}".format(buffermode))
 
     def _set_intermediate_harmonic_filename(self):
         out_base, out_extn = os.path.splitext(self.input_filename)
@@ -277,7 +281,7 @@ class JamInTune(object):
         soxtfm.pitch(shift)
         soxtfm.build_file(infile, self.output_filename)
 
-    def jam_out(self, direction="closest", bias=0):
+    def jam_out(self, direction="closest", bias=0, verbose=False):
         """
         Jam out!
         Isolate the harmonic content from the input audio, calculate the deviation from standard Western music notes,
@@ -294,6 +298,8 @@ class JamInTune(object):
         """
         self.harmonic_separator()
         deviation = self.eval_deviation()
+        if verbose:
+            print("Deviation: {}".format(deviation))
         self.modify_pitch(deviation, direction=direction, bias=bias)
 
 
