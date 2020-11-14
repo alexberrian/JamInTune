@@ -109,6 +109,41 @@ class JamInTune(object):
                              "or 'complex_full'".format(fft_type))
 
     @staticmethod
+    def _pad_boundary_rows(input_array: np.ndarray, finalsize: int, side: str) -> np.ndarray:
+        """
+        Pad each channel of a buffer, where channels are assumed to be in rows.
+        Padding happens at the boundary, by even reflection.
+
+        :param input_array: array to be padded by reflection
+        :param finalsize: finalsize: final size of the array (example: window size)
+        :param side: "left" or "right" to do the padding.
+                     i.e., if "left", then padding is done to the left of the input array.
+        :return: output_array: reflection-padded array
+        """
+        inputsize = input_array.shape[1]
+        if finalsize == inputsize:
+            return input_array
+        else:
+            padsize = finalsize - inputsize
+            if side == "left":
+                padsize_left = padsize
+                padsize_right = 0
+            elif side == "right":
+                padsize_left = 0
+                padsize_right = padsize
+            else:
+                raise ValueError("Pad side {} to pad_boundary_rows is invalid, "
+                                 "must be 'left' or 'right'".format(side))
+
+            if len(input_array.shape) == 2:
+                output_array = np.pad(input_array, ((0, 0), (padsize_left, padsize_right)), mode='reflect')
+            else:
+                raise ValueError("input array to pad_boundary_rows has dimensions {}, "
+                                 "which is not supported... must be 2D array even if mono".format(input_array.shape))
+
+            return output_array
+
+    @staticmethod
     def _zeropad_rows(input_array: np.ndarray, finalsize: int) -> np.ndarray:
         """
         Zeropad each channel of a buffer, where channels are assumed to be in rows.
@@ -136,6 +171,36 @@ class JamInTune(object):
 
             return output_array
 
+    def _eval_deviation_single_frame(self, f: np.ndarray, f_plus: np.ndarray, window: np.ndarray,
+                                     fftsize: int, samplerate: int, energy_constant: float, eps_logmag: float,
+                                     rf_lower_bound: float, rf_upper_bound: float, log_cutoff_freqbin: float):
+
+        wft = self._wft(f, window, fftsize)  # Calculate windowed fft of signal
+        wft_plus = self._wft(f_plus, window, fftsize)  # Calculate windowed fft of shifted signal
+        logabswft = np.log10(np.abs(wft) + eps_logmag)
+
+        # Calculate reassignment frequencies (unit: normalized frequency) and deal with edge cases
+        # Threshold the logabswft
+        rf = self._calculate_rf(wft, wft_plus)
+        in_bounds = np.where((rf >= rf_lower_bound) & (rf <= rf_upper_bound) & (logabswft >= log_cutoff_freqbin))
+        logabswft = logabswft[in_bounds]
+        rf = rf[in_bounds]
+        magwftsq = np.power(10., 2 * logabswft)
+
+        # Now calculate the deviations from the nearest piano key and get weights, then append weighted median
+        # Note that I do multiply by samplerate/self.A0_FREQUENCY,
+        # instead of division by rf_lower_bound, just in case rf_lower_bound gets changed.
+        rf_logarithmic = 12 * np.log2(rf * samplerate / self.A0_FREQUENCY)
+        nearest_piano_keys = np.round(rf_logarithmic).astype(int)
+        deviations = rf_logarithmic - nearest_piano_keys
+
+        if np.size(deviations):
+            median = ws.numpy_weighted_median(deviations, weights=magwftsq)  # Mag-squared works, log-mag doesn't
+            logenergy = np.log10((np.linalg.norm(wft) ** 2.0 / energy_constant) + eps_logmag)
+            return median, logenergy
+        else:
+            return None
+
     def harmonic_separator(self):
         """
         Creates intermediate wave file with harmonic-only content from the input wave file.
@@ -161,6 +226,7 @@ class JamInTune(object):
         windowsize = self.deviation_param_dict["windowsize"]
         windowfunc = self.deviation_param_dict["windowfunc"]
         fftsize = self.deviation_param_dict["fftsize"]
+        buffermode = self.deviation_param_dict["buffermode"]
         windowsize_p1 = windowsize + 1
         overlap = windowsize_p1 - hopsize
         window = windowfunc(windowsize)
@@ -186,8 +252,32 @@ class JamInTune(object):
         log_cutoff_stft_frame = self.deviation_param_dict["log_cutoff_dB_stft_frame"] / 20
         eps_logmag = self.deviation_param_dict["eps"]
 
+        # Just in case the audio signal has already been read out
+        sig.seek(frames=0)
+
+        if buffermode == "centered_analysis":
+            initial_block = sig.read(frames=windowsize + 1, always_2d=True)
+            initial_block = initial_block.T
+            # Pad the boundary with reflected audio frames, then get the medians, logenergies from those frames
+            frame0 = -(windowsize // 2)  # if window is odd, this centers audio frame 0.
+            while frame0 < 0:
+                reflect_block = self._pad_boundary_rows(initial_block[:, :(frame0 + windowsize)], windowsize, 'left')
+                reflect_block_plus = self._pad_boundary_rows(initial_block[:, :(frame0 + windowsize_p1)],
+                                                             windowsize, 'left')
+                output = self._eval_deviation_single_frame(reflect_block, reflect_block_plus, window, fftsize,
+                                                           samplerate, energy_constant, eps_logmag,
+                                                           rf_lower_bound, rf_upper_bound, log_cutoff_freqbin)
+                if output is not None:
+                    median, logenergy = output
+                    medians_per_stft_frame.append(median)
+                    logenergies_per_stft_frame.append(logenergy)
+                frame0 += hopsize
+        elif buffermode == "valid_analysis":
+            frame0 = 0
+        else:
+            raise ValueError("Invalid buffermode {}".format(buffermode))
+
         # Get the number of audio frames, and seek to the the first audio frame (no boundary treatment TODO???)
-        frame0 = 0
         num_audio_frames = sig.get_num_frames_from_and_seek_start(start_frame=frame0)
 
         # Now calculate the max number of FULL non-boundary frames you need to compute RF,
