@@ -60,7 +60,7 @@ class JamInTune(object):
             "log_cutoff_dB_freqbin":                     -30,
             "log_cutoff_dB_stft_frame":                  -70,
             "lower_cutoff_freq":                        200.,  # TODO: Optimize this, preferably signal-based manner
-            "buffermode":                   "valid_analysis",
+            "buffermode":                "centered_analysis",
         }
         self._check_deviation_params_valid()
 
@@ -278,17 +278,17 @@ class JamInTune(object):
         else:
             raise ValueError("Invalid buffermode {}".format(buffermode))
 
-        # Get the number of audio frames, and seek to the the first audio frame (no boundary treatment TODO???)
+        # Get the number of audio frames, and seek to the the first audio frame
         num_audio_frames = sig.get_num_frames_from_and_seek_start(start_frame=frame0)
 
         # Now calculate the max number of FULL non-boundary frames you need to compute RF,
         # considering hop size and window size.
         num_full_rf_frames = 1 + ((num_audio_frames - windowsize_p1) // hopsize)
 
-        # Convert that to the number of audio frames that you'll analyze for non-boundary RF. (TODO???)
+        # Convert that to the number of audio frames that you'll analyze for non-boundary RF.
         num_audio_frames_full_rf = (num_full_rf_frames - 1) * hopsize + windowsize_p1
 
-        # Feed blocks to create the non-boundary RF frames  (TODO???)
+        # Feed blocks to create the non-boundary RF frames
         blockreader = sig.blocks(blocksize=windowsize_p1, overlap=overlap,
                                  frames=num_audio_frames_full_rf, always_2d=True)
 
@@ -304,6 +304,38 @@ class JamInTune(object):
                 medians_per_stft_frame.append(median)
                 logenergies_per_stft_frame.append(logenergy)
             frame0 += hopsize
+
+        # Right boundary treatment
+        if buffermode == "centered_analysis":
+            # Need to read from frame0
+            sig.seek(frames=frame0)
+            # Read the rest of the file (length less than windowsize+1)
+            final_block = sig.read(always_2d=True)
+            final_block = final_block.T
+            final_block_num_frames = final_block.shape[1]
+            if final_block_num_frames >= windowsize_p1:
+                raise ValueError("You shouldn't have final_block_num_frames {} "
+                                 "greater than windowsize + 1 == {}".format(final_block_num_frames, windowsize_p1))
+            # Pad the boundary with reflected audio frames,
+            # then add boundary SST frames to the SST
+            frame1 = 0
+            halfwindowsize = (windowsize + 1) // 2   # Edge case: odd windows, want final valid sample to be in middle
+            while final_block_num_frames - frame1 >= halfwindowsize:
+                reflect_block = self._pad_boundary_rows(final_block[:, frame1:], windowsize, 'right')
+                reflect_block_plus = self._pad_boundary_rows(final_block[:, frame1 + 1:(frame1 + windowsize_p1)],
+                                                             windowsize, 'right')
+                output = self._eval_deviation_single_frame(reflect_block, reflect_block_plus, window, fftsize,
+                                                           samplerate, energy_constant, eps_logmag,
+                                                           rf_lower_bound, rf_upper_bound, log_cutoff_freqbin)
+                if output is not None:
+                    median, logenergy = output
+                    medians_per_stft_frame.append(median)
+                    logenergies_per_stft_frame.append(logenergy)
+                frame1 += hopsize
+        elif buffermode == "valid_analysis":  # Do nothing at this point
+            pass
+        else:
+            raise ValueError("Invalid buffermode {}".format(buffermode))
 
         # After looping through all blocks, soft threshold log energies and calculate the final weighted median
         # deviation
