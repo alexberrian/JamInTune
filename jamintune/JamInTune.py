@@ -255,6 +255,7 @@ class JamInTune(object):
         # Just in case the audio signal has already been read out
         sig.seek(frames=0)
 
+        # Left boundary treatment
         if buffermode == "centered_analysis":
             initial_block = sig.read(frames=windowsize + 1, always_2d=True)
             initial_block = initial_block.T
@@ -295,34 +296,12 @@ class JamInTune(object):
 
         for block in blockreader:
             block = block.T                                         # First transpose to get each channel as a row
-            try:
-                wft = self._wft(block[:, :windowsize], window, fftsize)  # Calculate windowed fft of signal
-            except ValueError:
-                print("Current frame at which there is an error: {}".format(frame0))
-                raise
-            wft_plus = self._wft(block[:, 1:], window, fftsize)      # Calculate windowed fft of shifted signal
-            logabswft = np.log10(np.abs(wft) + eps_logmag)
-
-            # Calculate reassignment frequencies (unit: normalized frequency) and deal with edge cases
-            # Threshold the logabswft
-            rf = self._calculate_rf(wft, wft_plus)
-            in_bounds = np.where( (rf >= rf_lower_bound) & (rf <= rf_upper_bound) & (logabswft >= log_cutoff_freqbin))
-            logabswft = logabswft[in_bounds]
-            rf = rf[in_bounds]
-            magwftsq = np.power(10., 2*logabswft)
-
-            # Now calculate the deviations from the nearest piano key and get weights, then append weighted median
-            # Note that I do multiply by samplerate/self.A0_FREQUENCY,
-            # instead of division by rf_lower_bound, just in case rf_lower_bound gets changed.
-            rf_logarithmic = 12 * np.log2(rf * samplerate / self.A0_FREQUENCY)
-            nearest_piano_keys = np.round(rf_logarithmic).astype(int)
-            deviations = rf_logarithmic - nearest_piano_keys
-
-            if np.size(deviations):
-                median = ws.numpy_weighted_median(deviations, weights=magwftsq)  # Mag-squared works, log-mag doesn't
+            output = self._eval_deviation_single_frame(block[:, :windowsize], block[:, 1:], window, fftsize,
+                                                       samplerate, energy_constant, eps_logmag,
+                                                       rf_lower_bound, rf_upper_bound, log_cutoff_freqbin)
+            if output is not None:
+                median, logenergy = output
                 medians_per_stft_frame.append(median)
-                # Now calculate the frame's log energy and append
-                logenergy = np.log10((np.linalg.norm(wft) ** 2.0 / energy_constant) + eps_logmag)
                 logenergies_per_stft_frame.append(logenergy)
             frame0 += hopsize
 
