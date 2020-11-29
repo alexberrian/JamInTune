@@ -44,6 +44,9 @@ class JamInTune(object):
         self.intermediate_harmonic_filename = None
         self.output_filename = None
         self.deviation_param_dict = {}
+        self.wft_shape = None
+        self.wft_memory = None
+
         self._initialize_deviation_params()
         self._set_intermediate_harmonic_filename()
         self._set_output_filename()
@@ -61,8 +64,22 @@ class JamInTune(object):
             "log_cutoff_dB_stft_frame":                  -70,
             "lower_cutoff_freq":                        200.,  # TODO: Optimize this, preferably signal-based manner
             "buffermode":                "centered_analysis",
+            "hpss_margin":                               3.0,
+            "hpss_kernel_harmonic":   self.KERNEL_HARMONIC_SIZE,
+            "hpss_kernel_percussive": self.KERNEL_PERCUSSIVE_SIZE,
         }
         self._check_deviation_params_valid()
+
+    def _initialize_helpers_hpss(self, channels):
+        """
+        Initialize helper arrays and variables for HPSS
+        :return:
+        """
+        fftsize = self.deviation_param_dict["fftsize"]
+        hpss_memory_num_frames = self.deviation_param_dict["hpss_kernel_harmonic"]
+        num_bins_up_to_nyquist = (fftsize // 2) + 1
+        self.wft_shape = (channels, num_bins_up_to_nyquist)
+        self.wft_memory = np.zeros([hpss_memory_num_frames, *self.wft_shape], dtype=complex)
 
     def _check_deviation_params_valid(self):
         windowsize = self.deviation_param_dict["windowsize"]
@@ -214,6 +231,33 @@ class JamInTune(object):
         harm, _ = librosa.decompose.hpss(stft, kernel_size=(31, 124), margin=3.0)
         y_harm = librosa.istft(harm)
         sf.write(self.intermediate_harmonic_filename, y_harm, sr)
+
+    def harmonic_separator_in_house(self):
+        # Initialize windowing variables
+        hopsize = self.deviation_param_dict["hopsize"]
+        windowsize = self.deviation_param_dict["windowsize"]
+        windowfunc = self.deviation_param_dict["windowfunc"]
+        fftsize = self.deviation_param_dict["fftsize"]
+        buffermode = self.deviation_param_dict["buffermode"]
+        window = windowfunc(windowsize)
+        energy_constant = windowsize * np.linalg.norm(window)**2.0
+
+        # Read the input signal
+        sig = AudioSignal(self.input_filename)
+        samplerate = sig.samplerate
+
+        # Just in case the audio signal has already been read out
+        sig.seek(frames=0)
+
+        # Left boundary treatment
+        if buffermode == "centered_analysis":
+            initial_block = sig.read(frames=windowsize + 1, always_2d=True)
+            initial_block = initial_block.T
+            # Pad the boundary with reflected audio frames, then compute wfts and do HPSS
+            frame0 = -(windowsize // 2)  # if window is odd, this centers audio frame 0.
+            while frame0 < 0:
+                reflect_block = self._pad_boundary_rows(initial_block[:, :(frame0 + windowsize)], windowsize, 'left')
+
 
     def eval_deviation(self):
         """
