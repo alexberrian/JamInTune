@@ -5,6 +5,8 @@ import weightedstats as ws
 import sox
 import librosa  #TODO: Replace librosa with real-time simultaneous HPSS and tuning
 import os
+from copy import deepcopy
+from scipy.ndimage import median_filter
 
 TWOPI = 2 * np.pi
 
@@ -45,7 +47,8 @@ class JamInTune(object):
         self.output_filename = None
         self.deviation_param_dict = {}
         self.wft_shape = None
-        self.wft_memory = None
+        self.wft_memory = None  # Memory of WFTs used to compute the HPSS
+        self.hpss_memory = None  # Memory of HPSS frames used to do inverse STFT before computing RF.
 
         self._initialize_deviation_params()
         self._set_intermediate_harmonic_filename()
@@ -76,10 +79,10 @@ class JamInTune(object):
         :return:
         """
         fftsize = self.deviation_param_dict["fftsize"]
-        hpss_memory_num_frames = self.deviation_param_dict["hpss_kernel_harmonic"]
+        wft_memory_num_frames = self.deviation_param_dict["hpss_kernel_harmonic"]
         num_bins_up_to_nyquist = (fftsize // 2) + 1
         self.wft_shape = (channels, num_bins_up_to_nyquist)
-        self.wft_memory = np.zeros([hpss_memory_num_frames, *self.wft_shape], dtype=complex)
+        self.wft_memory = np.zeros([wft_memory_num_frames, *self.wft_shape], dtype=complex)
 
     def _check_deviation_params_valid(self):
         windowsize = self.deviation_param_dict["windowsize"]
@@ -188,6 +191,46 @@ class JamInTune(object):
 
             return output_array
 
+    def _median_filter_harmonic(self, input_array: np.ndarray) -> np.ndarray:
+        """
+        Returns an array of shape (channels, frequency bins) that computes the medians in the time direction.
+        :param input_array:
+        :return:
+        """
+        assert(input_array.shape[0] == self.deviation_param_dict["hpss_kernel_harmonic"])
+        output_shape = input_array.shape[1:]
+        output_array = np.zeros(output_shape)
+
+        for channel in range(output_shape[0]):
+            mag = np.abs(input_array[:, channel, :])
+            phase = np.angle(input_array[:, channel, :])
+            output_array[channel] = np.median(mag, axis=0)*np.exp(phase * 1j)
+
+        return output_array
+
+    def _median_filter_percussive(self, input_array: np.ndarray) -> np.ndarray:
+        """
+        Returns an array of shape (channels, frequency bins) that computes the medians in the frequency direction.
+        :param input_array:
+        :return:
+        """
+        assert(input_array.ndim == 2)  # Input expected to be a single time slice
+        # Pad in the frequency direction
+        output_shape = input_array.shape
+        output_array = np.zeros(output_shape)
+        mag = np.abs(input_array)
+        phase = np.angle(input_array)
+        filter_size = self.deviation_param_dict["hpss_kernel_percussive"]
+        # padding_amount = filter_size // 2
+        # mag = np.pad(mag, ((0, 0), (padding_amount, padding_amount)), mode='symmetric')  # CHECK ME
+
+        for channel in range(output_shape[0]):
+            output_array[channel] = median_filter(mag[channel], size=filter_size) * np.exp(1j * phase[channel])
+            # for freqbin in range(output_shape[1]):  # TODO: SLOWWWWW.  Running median using two heaps? Or just skimage?
+            #     output_array[channel, freqbin] = np.median(mag[channel, freqbin:(freqbin + filter_size)])  # CHECK ME
+
+        return output_array
+
     def _eval_deviation_single_frame(self, f: np.ndarray, f_plus: np.ndarray, window: np.ndarray,
                                      fftsize: int, samplerate: int, energy_constant: float, eps_logmag: float,
                                      rf_lower_bound: float, rf_upper_bound: float, log_cutoff_freqbin: float):
@@ -232,31 +275,76 @@ class JamInTune(object):
         y_harm = librosa.istft(harm)
         sf.write(self.intermediate_harmonic_filename, y_harm, sr)
 
-    def harmonic_separator_in_house(self):
+    def eval_deviation_in_house(self):
         # Initialize windowing variables
         hopsize = self.deviation_param_dict["hopsize"]
         windowsize = self.deviation_param_dict["windowsize"]
         windowfunc = self.deviation_param_dict["windowfunc"]
         fftsize = self.deviation_param_dict["fftsize"]
         buffermode = self.deviation_param_dict["buffermode"]
+        windowsize_p1 = windowsize + 1
+        overlap = windowsize_p1 - hopsize
         window = windowfunc(windowsize)
         energy_constant = windowsize * np.linalg.norm(window)**2.0
+        wft_memory_num_frames = self.deviation_param_dict["hpss_kernel_harmonic"]
 
         # Read the input signal
         sig = AudioSignal(self.input_filename)
         samplerate = sig.samplerate
+        channels = sig.channels
+        assert(channels == self.wft_memory.shape[1])
+        assert(wft_memory_num_frames == self.wft_memory.shape[0])
 
         # Just in case the audio signal has already been read out
         sig.seek(frames=0)
 
+        # TODO: Should I treat boundary frames too, to make HPSS buffer?  Check after done with this step.
+
+        # Counting parameters
+        wft_memory_past_half = False
+        wft_memory_idx = 0
+        half_wft_memory_p1 = -wft_memory_num_frames // 2
+
+        # This is more complicated than I thought.
+        # I have to do an inverse STFT to get the original signal back and then compute RF.
+        # I could do an approximation, but it wouldn't be as accurate.
+
         # Left boundary treatment
         if buffermode == "centered_analysis":
-            initial_block = sig.read(frames=windowsize + 1, always_2d=True)
+            initial_block = sig.read(frames=windowsize + 1, always_2d=True)  # So that RF can be computed.
             initial_block = initial_block.T
             # Pad the boundary with reflected audio frames, then compute wfts and do HPSS
             frame0 = -(windowsize // 2)  # if window is odd, this centers audio frame 0.
             while frame0 < 0:
                 reflect_block = self._pad_boundary_rows(initial_block[:, :(frame0 + windowsize)], windowsize, 'left')
+                self.wft_memory[wft_memory_idx] = self._wft(reflect_block, window, fftsize)
+                wft_memory_idx += 1
+
+                if not wft_memory_past_half:
+                    # Check whether we've wrapped around to the start of the self.wft_memory buffer
+                    if wft_memory_idx == 0:
+                        wft_memory_past_half = True
+                    else:
+                        # Insert the reflection in the array.
+                        # Need to subtract one to get the indexing right.
+                        # So the array fills from the center out,
+                        # and the furthest boundary frames get overwritten first.
+                        self.wft_memory[-wft_memory_idx - 1] = deepcopy(self.wft_memory[wft_memory_idx])
+
+                if wft_memory_past_half:  # Compute HPSS
+                    # Do median filtering
+                    harmonic_array = self._median_filter_harmonic(self.wft_memory)
+                    percussive_array = self._median_filter_percussive(self.wft_memory)
+
+                    # Soft threshold here to yield the final harmonic spectrum (with margin parameter etc.)
+                    pass
+
+                    # Store the harmonic spectrum
+                    pass
+
+                    # Make sure the index rolls over
+                    wft_memory_idx %= wft_memory_num_frames
+
 
 
     def eval_deviation(self):
@@ -301,7 +389,7 @@ class JamInTune(object):
 
         # Left boundary treatment
         if buffermode == "centered_analysis":
-            initial_block = sig.read(frames=windowsize + 1, always_2d=True)
+            initial_block = sig.read(frames=windowsize_p1, always_2d=True)
             initial_block = initial_block.T
             # Pad the boundary with reflected audio frames, then get the medians, logenergies from those frames
             frame0 = -(windowsize // 2)  # if window is odd, this centers audio frame 0.
