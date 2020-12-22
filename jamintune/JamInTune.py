@@ -48,7 +48,7 @@ class JamInTune(object):
         self.deviation_param_dict = {}
         self.wft_shape = None
         self.wft_memory = None  # Memory of WFTs used to compute the HPSS
-        self.hpss_memory = None  # Memory of HPSS frames used to do inverse STFT before computing RF.
+        self.harm_memory = None  # Memory of HPSS frames used to do inverse STFT before computing RF.
 
         self._initialize_deviation_params()
         self._set_intermediate_harmonic_filename()
@@ -193,43 +193,62 @@ class JamInTune(object):
 
     def _median_filter_harmonic(self, input_array: np.ndarray) -> np.ndarray:
         """
-        Returns an array of shape (channels, frequency bins) that computes the medians in the time direction.
+        Returns an array of shape (channels, frequency bins) that computes the medians in the time direction,
+        with phase information discarded.
         :param input_array:
         :return:
         """
         assert(input_array.shape[0] == self.deviation_param_dict["hpss_kernel_harmonic"])
         output_shape = input_array.shape[1:]
-        output_array = np.zeros(output_shape)
+        output_mag = np.zeros(output_shape)
 
         for channel in range(output_shape[0]):
             mag = np.abs(input_array[:, channel, :])
-            phase = np.angle(input_array[:, channel, :])
-            output_array[channel] = np.median(mag, axis=0)*np.exp(phase * 1j)
+            output_mag[channel] = np.median(mag, axis=0)
 
-        return output_array
+        return output_mag
 
     def _median_filter_percussive(self, input_array: np.ndarray) -> np.ndarray:
         """
-        Returns an array of shape (channels, frequency bins) that computes the medians in the frequency direction.
+        Returns an array of shape (channels, frequency bins) that computes the medians in the frequency direction,
+        with phase information discarded.
         :param input_array:
         :return:
         """
         assert(input_array.ndim == 2)  # Input expected to be a single time slice
         # Pad in the frequency direction
         output_shape = input_array.shape
-        output_array = np.zeros(output_shape)
+        output_mag = np.zeros(output_shape)
         mag = np.abs(input_array)
-        phase = np.angle(input_array)
         filter_size = self.deviation_param_dict["hpss_kernel_percussive"]
         # padding_amount = filter_size // 2
         # mag = np.pad(mag, ((0, 0), (padding_amount, padding_amount)), mode='symmetric')  # CHECK ME
 
         for channel in range(output_shape[0]):
-            output_array[channel] = median_filter(mag[channel], size=filter_size) * np.exp(1j * phase[channel])
+            output_mag[channel] = median_filter(mag[channel], size=filter_size)
             # for freqbin in range(output_shape[1]):  # TODO: SLOWWWWW.  Running median using two heaps? Or just skimage?
-            #     output_array[channel, freqbin] = np.median(mag[channel, freqbin:(freqbin + filter_size)])  # CHECK ME
+            #     output_mag[channel, freqbin] = np.median(mag[channel, freqbin:(freqbin + filter_size)])  # CHECK ME
 
-        return output_array
+        return output_mag
+
+    @staticmethod
+    def _soft_mask(a: np.ndarray, b: np.ndarray, margin: float, pwr: float) -> np.ndarray:
+        """
+        Soft mask with a margin
+        :param a:
+        :param b:
+        :param margin:
+        :param pwr:
+        :return:
+        """
+        assert(a >= 0)
+        assert(b >= 0)
+        apwr = a ** pwr
+        mbpwr = (margin * b) ** pwr
+        divisor = apwr + mbpwr
+        # Avoid bad float errors
+        divisor[divisor < np.finfo(np.float32).tiny] = 1
+        return apwr / divisor
 
     def _eval_deviation_single_frame(self, f: np.ndarray, f_plus: np.ndarray, window: np.ndarray,
                                      fftsize: int, samplerate: int, energy_constant: float, eps_logmag: float,
@@ -285,6 +304,7 @@ class JamInTune(object):
         windowsize_p1 = windowsize + 1
         overlap = windowsize_p1 - hopsize
         window = windowfunc(windowsize)
+        margin = self.deviation_param_dict["hpss_margin"]
         energy_constant = windowsize * np.linalg.norm(window)**2.0
         wft_memory_num_frames = self.deviation_param_dict["hpss_kernel_harmonic"]
 
@@ -301,9 +321,9 @@ class JamInTune(object):
         # TODO: Should I treat boundary frames too, to make HPSS buffer?  Check after done with this step.
 
         # Counting parameters
-        wft_memory_past_half = False
-        wft_memory_idx = 0
-        half_wft_memory_p1 = -wft_memory_num_frames // 2
+        wft_memory_full = False
+        wft_memory_idx = -wft_memory_num_frames // 2  # (Ex: if wft_memory_num_frames == 31 then this is -16.)
+        harmonic_memory_idx = -wft_memory_num_frames // 2
 
         # This is more complicated than I thought.
         # I have to do an inverse STFT to get the original signal back and then compute RF.
@@ -320,10 +340,10 @@ class JamInTune(object):
                 self.wft_memory[wft_memory_idx] = self._wft(reflect_block, window, fftsize)
                 wft_memory_idx += 1
 
-                if not wft_memory_past_half:
+                if not wft_memory_full:
                     # Check whether we've wrapped around to the start of the self.wft_memory buffer
                     if wft_memory_idx == 0:
-                        wft_memory_past_half = True
+                        wft_memory_full = True
                     else:
                         # Insert the reflection in the array.
                         # Need to subtract one to get the indexing right.
@@ -331,19 +351,17 @@ class JamInTune(object):
                         # and the furthest boundary frames get overwritten first.
                         self.wft_memory[-wft_memory_idx - 1] = deepcopy(self.wft_memory[wft_memory_idx])
 
-                if wft_memory_past_half:  # Compute HPSS
-                    # Do median filtering
-                    harmonic_array = self._median_filter_harmonic(self.wft_memory)
-                    percussive_array = self._median_filter_percussive(self.wft_memory)
-
-                    # Soft threshold here to yield the final harmonic spectrum (with margin parameter etc.)
-                    pass
-
-                    # Store the harmonic spectrum
-                    pass
-
+                if wft_memory_full:  # Compute HPSS
                     # Make sure the index rolls over
                     wft_memory_idx %= wft_memory_num_frames
+
+                    # Do median filtering
+                    harmonic_array = self._median_filter_harmonic(self.wft_memory)
+                    percussive_array = self._median_filter_percussive(self.wft_memory[harmonic_memory_idx])
+
+                    # Soft mask here to yield the final harmonic spectrum (with margin parameter etc.)
+                    harmonic_mask = self._soft_mask(harmonic_array, percussive_array, margin=margin, pwr=2)
+                    self.harm_memory[wft_memory_idx] = harmonic_mask * self.wft_memory[harmonic_memory_idx]
 
 
 
