@@ -129,7 +129,7 @@ class JamInTune(object):
                              "or 'complex_full'".format(fft_type))
 
     @staticmethod
-    def _pad_boundary_rows(input_array: np.ndarray, finalsize: int, side: str) -> np.ndarray:
+    def _pad_boundary_rows(input_array: np.ndarray, finalsize: int, side: str, flip: bool = False) -> np.ndarray:
         """
         Pad each channel of a buffer, where channels are assumed to be in rows.
         Padding happens at the boundary, by even reflection.
@@ -138,6 +138,7 @@ class JamInTune(object):
         :param finalsize: finalsize: final size of the array (example: window size)
         :param side: "left" or "right" to do the padding.
                      i.e., if "left", then padding is done to the left of the input array.
+        :param flip: Flip the array before exporting (default False)
         :return: output_array: reflection-padded array
         """
         inputsize = input_array.shape[1]
@@ -161,7 +162,10 @@ class JamInTune(object):
                 raise ValueError("input array to pad_boundary_rows has dimensions {}, "
                                  "which is not supported... must be 2D array even if mono".format(input_array.shape))
 
-            return output_array
+            if flip:
+                return output_array[::-1]
+            else:
+                return output_array
 
     @staticmethod
     def _zeropad_rows(input_array: np.ndarray, finalsize: int) -> np.ndarray:
@@ -302,6 +306,7 @@ class JamInTune(object):
         fftsize = self.deviation_param_dict["fftsize"]
         buffermode = self.deviation_param_dict["buffermode"]
         windowsize_p1 = windowsize + 1
+        halfwindowsize = windowsize // 2
         overlap = windowsize_p1 - hopsize
         window = windowfunc(windowsize)
         margin = self.deviation_param_dict["hpss_margin"]
@@ -328,9 +333,55 @@ class JamInTune(object):
         # This is more complicated than I thought.
         # I have to do an inverse STFT to get the original signal back and then compute RF.
         # I could do an approximation, but it wouldn't be as accurate.
+        # Note: Earliest sample v needed is the one to compute STFT frame n = -W/(2H) + 1,
+        # which implies v = H - W/2 - W/2 = H - W (because need f[v] for v = 0 - n*H - W/2 BEFORE ZERO PADDING).
+        # In our case v = 2048 - 8192 = -6144, so we need to reflect 6144 samples.
+        # Unfortunately I will have to introduce a function different from _pad_boundary_rows
+        # or revise it to cover this case (it makes assumption of more non-reflected samples than reflected ones.)
 
         # Left boundary treatment
-        if buffermode == "centered_analysis":
+        if buffermode == "reconstruction":
+            initial_block = sig.read(frames=windowsize + 1, always_2d=True)  # In this case I really don't need +1.
+            initial_block = initial_block.T
+            # Pad the boundary with reflected audio frames, then compute wfts and do HPSS
+            # CHANGE LINE BELOW
+            frame0 = hopsize - windowsize
+            while frame0 < 0:
+                if frame0 < -(windowsize // 2):  # Boundary frames for perfect reconstruction
+                    reflect_block = self._pad_boundary_rows(initial_block[:, :(-frame0)],
+                                                            windowsize, 'left', flip=True)
+                else:
+                    reflect_block = self._pad_boundary_rows(initial_block[:, :(frame0 + windowsize)], windowsize,
+                                                            'left')
+                self.wft_memory[wft_memory_idx] = self._wft(reflect_block, window, fftsize)
+                wft_memory_idx += 1
+
+                if not wft_memory_full:
+                    # Check whether we've wrapped around to the start of the self.wft_memory buffer
+                    if wft_memory_idx == 0:
+                        wft_memory_full = True
+                    else:
+                        # Insert the reflection in the array.
+                        # Need to subtract one to get the indexing right.
+                        # So the array fills from the center out,
+                        # and the furthest boundary frames get overwritten first.
+                        self.wft_memory[-wft_memory_idx - 1] = deepcopy(self.wft_memory[wft_memory_idx])
+
+                if wft_memory_full:  # Compute HPSS
+                    # Make sure the index rolls over
+                    wft_memory_idx %= wft_memory_num_frames
+
+                    # Do median filtering
+                    harmonic_array = self._median_filter_harmonic(self.wft_memory)
+                    percussive_array = self._median_filter_percussive(self.wft_memory[harmonic_memory_idx])
+
+                    # Soft mask here to yield the final harmonic spectrum (with margin parameter etc.)
+                    harmonic_mask = self._soft_mask(harmonic_array, percussive_array, margin=margin, pwr=2)
+                    self.harm_memory[wft_memory_idx] = harmonic_mask * self.wft_memory[harmonic_memory_idx]
+
+                frame0 += hopsize
+
+        elif buffermode == "centered_analysis":
             initial_block = sig.read(frames=windowsize + 1, always_2d=True)  # So that RF can be computed.
             initial_block = initial_block.T
             # Pad the boundary with reflected audio frames, then compute wfts and do HPSS
@@ -363,7 +414,7 @@ class JamInTune(object):
                     harmonic_mask = self._soft_mask(harmonic_array, percussive_array, margin=margin, pwr=2)
                     self.harm_memory[wft_memory_idx] = harmonic_mask * self.wft_memory[harmonic_memory_idx]
 
-
+                frame0 += hopsize
 
     def eval_deviation(self):
         """
