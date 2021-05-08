@@ -48,7 +48,9 @@ class JamInTune(object):
         self.deviation_param_dict = {}
         self.wft_shape = None
         self.wft_memory = None  # Memory of WFTs used to compute the HPSS
-        self.harm_memory = None  # Memory of HPSS frames used to do inverse STFT before computing RF.
+        self.harm_memory = None  # Memory of HPSS FFT frames used to do overlap-add and then later saved for RF.
+        self.overlap_add_memory = None  # Memory of HPSS waveform used to compute shifted FFT and then RF.
+        self.overlap_add_memory_num_samples_per_channel = None
 
         self._initialize_deviation_params()
         self._set_intermediate_harmonic_filename()
@@ -80,9 +82,16 @@ class JamInTune(object):
         """
         fftsize = self.deviation_param_dict["fftsize"]
         wft_memory_num_frames = self.deviation_param_dict["hpss_kernel_harmonic"]
+        windowsize = self.deviation_param_dict["windowsize"]
+        hopsize = self.deviation_param_dict["hopsize"]
+        self.overlap_add_memory_num_samples_per_channel = 2 * windowsize
+        harm_memory_num_frames = int(np.ceil(self.overlap_add_memory_num_samples_per_channel / hopsize))
         num_bins_up_to_nyquist = (fftsize // 2) + 1
         self.wft_shape = (channels, num_bins_up_to_nyquist)
         self.wft_memory = np.zeros([wft_memory_num_frames, *self.wft_shape], dtype=complex)
+        self.harm_memory = np.zeros([harm_memory_num_frames, *self.wft_shape], dtype=complex)
+        self.overlap_add_memory = np.zeros([self.overlap_add_memory_num_samples_per_channel, channels],
+                                           dtype=np.float32)
 
     def _check_deviation_params_valid(self):
         windowsize = self.deviation_param_dict["windowsize"]
@@ -98,6 +107,9 @@ class JamInTune(object):
             raise ValueError("Cannot have windowsize {} larger than fftsize {}".format(windowsize, fftsize))
         if buffermode not in ["centered_analysis", "valid_analysis"]:
             raise ValueError("Invalid buffermode {}".format(buffermode))
+        if windowsize % (2 * hopsize):
+            raise ValueError("windowsize {} must be divisible by 2 * hopsize {} "
+                             "in order for overlap-add to work without errors".format(windowsize, 2 * hopsize))
 
     def _set_intermediate_harmonic_filename(self):
         out_base, out_extn = os.path.splitext(self.input_filename)
@@ -254,6 +266,28 @@ class JamInTune(object):
         divisor[divisor < np.finfo(np.float32).tiny] = 1
         return apwr / divisor
 
+    def _overlap_add_to_harmonic_signal(self, input_array: np.ndarray, start_idx: int):
+        """
+        This should only perform the vectorized add in place.
+
+        Steps to the whole procedure:
+        1. Vectorized add
+        2. FFT of SHIFTED signal
+        3. Zero out circular buffer for the first H samples of the NONshifted signal
+         --- actually I need to be really careful with this.  That off-by-one will cause issues.
+
+        :return:
+        """
+        # TODO: CHECK DIMENSIONS
+        windowsize = self.deviation_param_dict["windowsize"]
+        if input_array.shape[0] != windowsize:
+            raise ValueError("Must feed input array of length windowsize to overlap-add")
+        indices = (idx % self.overlap_add_memory_num_samples_per_channel for idx in
+                   range(start_idx, start_idx + windowsize))
+        self.overlap_add_memory[indices] += input_array
+
+        pass
+
     def _eval_deviation_single_frame(self, f: np.ndarray, f_plus: np.ndarray, window: np.ndarray,
                                      fftsize: int, samplerate: int, energy_constant: float, eps_logmag: float,
                                      rf_lower_bound: float, rf_upper_bound: float, log_cutoff_freqbin: float):
@@ -334,7 +368,7 @@ class JamInTune(object):
         # I have to do an inverse STFT to get the original signal back and then compute RF.
         # I could do an approximation, but it wouldn't be as accurate.
         # Note: Earliest sample v needed is the one to compute STFT frame n = -W/(2H) + 1,
-        # which implies v = H - W/2 - W/2 = H - W (because need f[v] for v = 0 - n*H - W/2 BEFORE ZERO PADDING).
+        # which implies v = H - W/2 - W/2 = H - W (because need f[v] for v = 0 + n*H - W/2 BEFORE ZERO PADDING).
         # In our case v = 2048 - 8192 = -6144, so we need to reflect 6144 samples.
         # Unfortunately I will have to introduce a function different from _pad_boundary_rows
         # or revise it to cover this case (it makes assumption of more non-reflected samples than reflected ones.)
@@ -344,7 +378,6 @@ class JamInTune(object):
             initial_block = sig.read(frames=windowsize + 1, always_2d=True)  # In this case I really don't need +1.
             initial_block = initial_block.T
             # Pad the boundary with reflected audio frames, then compute wfts and do HPSS
-            # CHANGE LINE BELOW
             frame0 = hopsize - windowsize
             while frame0 < 0:
                 if frame0 < -(windowsize // 2):  # Boundary frames for perfect reconstruction
@@ -378,6 +411,8 @@ class JamInTune(object):
                     # Soft mask here to yield the final harmonic spectrum (with margin parameter etc.)
                     harmonic_mask = self._soft_mask(harmonic_array, percussive_array, margin=margin, pwr=2)
                     self.harm_memory[wft_memory_idx] = harmonic_mask * self.wft_memory[harmonic_memory_idx]
+
+                    # Next, if available, overlap-add and shift then FFT again
 
                 frame0 += hopsize
 
