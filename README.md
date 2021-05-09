@@ -1,7 +1,11 @@
 # JamInTune
 <b>Tune an audio recording to match standard Western piano key frequencies</b>  (Python package)  
 <i>Hacking Audio Music Research (HAMR) 2020</i>  
-<b>Author:</b> Alex Berrian
+<b>Author:</b> Alex Berrian   
+<b>Version 0.0.0</b> (updated May 8, 2021 for proper Python package structure and installation)  
+<b>Youtube demo:</b>    
+[![JamInTune](https://static.wixstatic.com/media/ad4128_a1fffaac2fd6476d888e3b52d5388707~mv2.png)](http://youtube.com/watch?v=fAkMpbIPKv4 "JamInTune")
+
 
 ## Motivation
 Jamming along to a song is most fun when you're in tune with the song.  
@@ -32,30 +36,43 @@ Robert Johnson - Kind Hearted Woman Blues
 - Pitch shift old recordings for sampling in a song you make
 - Make your DJ mixes sound better
 
-## Dependencies
-This code requires `python3.7` and the following Python packages, installable via pip:
-```
-librosa==0.8.0
-soundfile==0.10.3.post1
-weightedstats==0.4.1
-sox==1.4.1
-```
-
 ## Get the code and try it out!
+There are a couple of ways to install JamInTune.
+See "Dependencies" below for more info on package dependencies.
+
+### pip installation from local (recommended)
+If you install this way, it's recommended that you initialize a virtual environment first (see [here](https://packaging.python.org/guides/installing-using-pip-and-virtual-environments/#creating-a-virtual-environment) for details if you are unfamiliar with virtual environments in Python).  The reason is to avoid dependency conflicts with other packages.
 ```
 git clone git@github.com:alexberrian/JamInTune.git JamInTune
-pip3 install -r requirements.txt
 cd JamInTune
+pip3 install -r requirements.txt
 python3  # Then from here look at "Usage" below
 ```
 
+### Docker installation
+Another way of installing JamInTune is by compiling a Docker image on your system, so that you can run JamInTune in its own low-resource container and not worry about dependency conflicts.  This requires Docker to be installed on your system - see [here](https://docs.docker.com/get-started/) for more info.
+
+The Dockerfile is based on the `python3.8` Docker image.  To get the code and compile the Docker image, run the following in command line:
+```
+git clone git@github.com:alexberrian/JamInTune.git JamInTune
+cd JamInTune
+docker build -t jamintune .
+```
+Then, you can run the Docker image `jamintune:latest` in a Docker container.  To actually see JamInTune work, you should also mount the local folder `/path/to/music` of music files that you want to work with to a location in the Docker container (for example, `/music`), in the following way:
+```
+docker run -it -v /path/to/music:/music  jamintune:latest
+```
+Running the above line will put you in the Python3 shell, and you can run the code as in the example below.
+
 ## Usage
+(Note that this has changed slightly with the version 0.0.0 update, and differs from the Youtube video!)
+
 Simple example (from within the Python3 shell):
 ```
-import JamInTune
-filename = "/path/to/blackholesun.wav"
+from jamintune import JamInTune  # Different from Youtube video
+filename = "/music/blackholesun.wav"
 jam = JamInTune.JamInTune(filename)
-jam.jam_out()  # Exports the tuned file as "/path/to/blackholesun_tuned.wav"
+jam.jam_out()  # Exports the tuned file as "/music/blackholesun_tuned.wav"
 ```
 If you want the recording to be shifted to the closest piano keys up or down, rather than the closest keys in whatever direction:
 ```
@@ -114,6 +131,19 @@ This final number is our approximate deviation.
 ### 3) Pitch shift the recording according to the approximate deviation
 We use the [`pysox`](https://pypi.org/project/sox/) Python wrapper around `sox` to pitch-shift the input recording according 
 to the approximate deviation, then export it.
+
+## Dependencies
+This code expects `python>=3.7` and requires the following Python packages, installable via pip:
+```
+numpy>=1.16.4
+librosa==0.8.0
+soundfile>=0.10.3.post1
+weightedstats>=0.4.1
+sox>=1.4.1
+llvmlite==0.33.0
+numba==0.50.1
+```
+*Note:* `llvmlite` and `numba` are fixed at these version numbers in the setup file due to `librosa` having dependency issues.  If you have different versions of these packages in your setup or virtual environment, this will likely cause an issue for JamInTune.  In a future version of this code, it is expected that `librosa` will be removed entirely for the sake of eliminating this issue and also to allow for a speed optimization.  In the Dockerized version, all packages except numpy are fixed at these version numbers, to ensure minimum compatibility issues.  If some future version of `numpy` causes an error (unlikely) then that will be fixed as it comes.
 
 ## Issues and Future Work
 - The code runs slowly, due to repetition in the computation. 
