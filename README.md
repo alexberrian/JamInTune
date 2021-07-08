@@ -2,7 +2,7 @@
 <b>Tune an audio recording to match standard Western piano key frequencies</b>  (Python package)  
 <i>Hacking Audio Music Research (HAMR) 2020</i>  
 <b>Author:</b> Alex Berrian   
-<b>Version 0.0.0</b> (updated May 8, 2021 for proper Python package structure and installation)  
+<b>Version 0.0.1</b> (fixed requirements.txt)  
 <b>Youtube demo:</b>    
 [![JamInTune](https://static.wixstatic.com/media/ad4128_a1fffaac2fd6476d888e3b52d5388707~mv2.png)](http://youtube.com/watch?v=fAkMpbIPKv4 "JamInTune")
 
@@ -46,6 +46,7 @@ If you install this way, it's recommended that you initialize a virtual environm
 git clone git@github.com:alexberrian/JamInTune.git JamInTune
 cd JamInTune
 pip3 install -r requirements.txt
+python3 setup.py install
 python3  # Then from here look at "Usage" below
 ```
 
